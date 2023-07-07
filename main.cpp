@@ -1,8 +1,12 @@
 #include <iostream>
 #include <fstream>
 #include <vector>
-#include <pthread.h>
 #include <limits>
+#include <ctime>
+#include <atomic>
+#include <pthread.h>
+#include <algorithm>
+#include <iomanip>
 
 using namespace std;
 
@@ -18,8 +22,7 @@ struct Graph {
 struct ThreadData {
     int start, end;
     Graph* graph;
-    vector<int>* distance;
-    pthread_barrier_t* barrier;
+    vector<atomic<int>>* distance;
 };
 
 void* bellmanFordPartial(void* args) {
@@ -27,28 +30,31 @@ void* bellmanFordPartial(void* args) {
     int start = data->start;
     int end = data->end;
     Graph* graph = data->graph;
-    vector<int>* distance = data->distance;
-    pthread_barrier_t* barrier = data->barrier;
+    vector<atomic<int>>* distance = data->distance;
 
-    for (int i = 0; i < graph->V - 1; ++i) {
+    bool changed = true;
+    while (changed) {
+        changed = false;
         for (int j = start; j < end; ++j) {
             int u = graph->edges[j].src;
             int v = graph->edges[j].dest;
             int weight = graph->edges[j].weight;
 
-            if ((*distance)[u] != numeric_limits<int>::max() && (*distance)[u] + weight < (*distance)[v]) {
-                (*distance)[v] = (*distance)[u] + weight;
+            int current_dist = (*distance)[v].load();
+            int new_dist = (*distance)[u].load() + weight;
+            while (new_dist < current_dist && !(*distance)[v].compare_exchange_weak(current_dist, new_dist)) {
+                new_dist = (*distance)[u].load() + weight;
+                changed = true;
             }
         }
-        pthread_barrier_wait(barrier);
     }
 
     return nullptr;
 }
 
 int main() {
-//    ifstream infile("/home/virgil/CLionProjects/bellmanFord/mapDataTest.txt");
     ifstream infile("/home/virgil/Documents/data/USA-road-d.FLA.gr");
+//    ifstream infile("/home/virgil/CLionProjects/bellmanFord/mapDataTest.txt");
     if (!infile) {
         cerr << "Error opening the file." << endl;
         return 1;
@@ -56,14 +62,17 @@ int main() {
 
     int num_nodes, num_edges;
     infile >> num_nodes >> num_edges;
-    num_nodes = num_nodes+1;
+    num_nodes = num_nodes + 1;
     Graph graph;
     graph.V = num_nodes;
     graph.E = num_edges;
 
+    cout << "Node num: " << num_nodes << ", edges: " << num_edges << endl;
+    cout << "Running Bellman Ford's algorithm with starting node 1" << endl;
+
     for (int i = 0; i < num_edges; ++i) {
         int src, dest, weight;
-        char skip_word;;
+        char skip_word;
         infile >> skip_word >> src >> dest >> weight;
         graph.edges.push_back({src, dest, weight});
     }
@@ -74,24 +83,21 @@ int main() {
     double duration;
     start = clock();
 
-    vector<int> distance(num_nodes, numeric_limits<int>::max());
-    distance[1] = 0; // Assuming the source node is 0
+    vector<atomic<int>> distance(num_nodes);
+    for (int i = 0; i < num_nodes; ++i) {
+        distance[i] = (i == 1) ? 0 : numeric_limits<int>::max();
+    }
 
-    int num_threads = 4; // Change this to the desired number of threads
+    int num_threads = 4;
     pthread_t threads[num_threads];
     ThreadData thread_data[num_threads];
-    pthread_barrier_t barrier;
 
-    pthread_barrier_init(&barrier, nullptr, num_threads);
-
-    int edges_per_thread = 7;
-
+    int edges_per_thread = (num_edges + num_threads - 1) / num_threads;  // ceil division
     for (int i = 0; i < num_threads; ++i) {
         thread_data[i].start = i * edges_per_thread;
         thread_data[i].end = min((i + 1) * edges_per_thread, num_edges);
         thread_data[i].graph = &graph;
         thread_data[i].distance = &distance;
-        thread_data[i].barrier = &barrier;
 
         pthread_create(&threads[i], nullptr, bellmanFordPartial, &thread_data[i]);
     }
@@ -103,25 +109,17 @@ int main() {
     stop = clock();
     duration = ((double)(stop - start)) / CLOCKS_PER_SEC;
 
-    cout << duration << endl;
-    cout << "finished" << endl;
-//// Check for negative-weight cycles
-//    for (int i = 0; i < graph.E; ++i) {
-//        int u = graph.edges[i].src;
-//        int v = graph.edges[i].dest;
-//        int weight = graph.edges[i].weight;
-//
-//        if (distance[u] != numeric_limits<int>::max() && distance[u] + weight < distance[v]) {
-//            cerr << "Graph contains a negative-weight cycle." << endl;
-//            return 1;
-//        }
-//    }
+    cout << "Execution time: " << duration << endl;
+    cout << "Finished" << endl;
 
-// Print the shortest path distances
-//    cout << "Vertex\tDistance from Source" << endl;
-//    for (int i = 0; i < num_nodes; ++i) {
-//        cout << i << "\t\t" << distance[i] << endl;
-//    }
+    cout << "Shortest distances from node 1:" << endl;
+    for (int i = 1; i < num_nodes; ++i) {
+        if (distance[i] != numeric_limits<int>::max()) {
+            cout << "Distance to node " << setw(2) << i << ": " << distance[i] << endl;
+        } else {
+            cout << "Distance to node " << setw(2) << i << ": INF" << endl;
+        }
+    }
 
     return 0;
 }
